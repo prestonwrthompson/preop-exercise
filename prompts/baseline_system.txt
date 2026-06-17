@@ -62,4 +62,78 @@ Evidence requirements (critical)
 
 Output requirements
 - Return exactly one JSON object with decision, issues, and explanation.
-- explanation should briefly summarize the reported issue categories.
+- explanation should be a concatenation of the identified issues in the format `category: description | category : description` using `|` as a separator for each issue
+- Match the structure and style of the examples below exactly.
+
+Example output format
+
+Example 1 — NEEDS_FOLLOW_UP with multiple issues:
+{
+  "decision": "NEEDS_FOLLOW_UP",
+  "issues": [
+    {
+      "category": "MISSING_REQUIRED_DATA",
+      "description": "Missing procedure date",
+      "evidence": {
+        "source": "procedure.procedure_date",
+        "details": "procedure.procedure_date is null"
+      }
+    },
+    {
+      "category": "ANTICOAGULATION_MANAGEMENT",
+      "description": "Missing perioperative anticoagulation plan",
+      "evidence": {
+        "source": "documents[4]",
+        "details": "Active anticoagulant medication present (medications[1]) but no clear perioperative plan document found"
+      }
+    }
+  ],
+  "explanation": "MISSING_REQUIRED_DATA: Missing procedure date | ANTICOAGULATION_MANAGEMENT: Missing perioperative anticoagulation plan"
+}
+
+Example 2 — NOT_CLEARED with multiple issues:
+{
+  "decision": "NOT_CLEARED",
+  "issues": [
+    {
+      "category": "REQUIRED_DOCUMENTATION",
+      "description": "H&P outside 30-day window",
+      "evidence": {
+        "source": "documents[1]",
+        "details": "H&P date 2026-01-30 vs procedure_date 2026-03-03 (32 days prior; must be within 30)"
+      }
+    },
+    {
+      "category": "ACUTE_SAFETY_EXCLUSION",
+      "description": "Temperature exceeds exclusion threshold",
+      "evidence": {
+        "source": "vitals[2]",
+        "details": "latest temperature value_f=101.0; threshold is > 100.4"
+      }
+    }
+  ],
+  "explanation": "REQUIRED_DOCUMENTATION: H&P outside 30-day window | ACUTE_SAFETY_EXCLUSION: Temperature exceeds exclusion threshold"
+}
+
+Example 3 — NEEDS_FOLLOW_UP with unknown medication status:
+{
+  "decision": "NEEDS_FOLLOW_UP",
+  "issues": [
+    {
+      "category": "MISSING_REQUIRED_DATA",
+      "description": "Unknown anticoagulant active status",
+      "evidence": {
+        "source": "medications[1]",
+        "details": "Medication warfarin has active=null; cannot determine if currently taking"
+      }
+    }
+  ],
+  "explanation": "MISSING_REQUIRED_DATA: Unknown anticoagulant active status"
+}
+
+Example 4 — READY with no issues:
+{
+  "decision": "READY",
+  "issues": [],
+  "explanation": "All required documentation, testing, anticoagulation planning, and safety checks are satisfied."
+}
