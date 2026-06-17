@@ -166,6 +166,7 @@ def build_user_prompt(submission: dict[str, object]) -> str:
 
     sections = [
         "Evaluate this patient package for pre-op scheduling readiness using the provided policy.",
+        "Apply the missing-data handling and evidence requirements from the policy.",
         "Return your response as JSON.",
         "Submission JSON:",
         json.dumps(submission, sort_keys=True),

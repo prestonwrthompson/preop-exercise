@@ -10,29 +10,56 @@ Output exactly one status:
 
 Rule 1: Required documentation
 - History and Physical (H&P) must exist and be completed within 30 days of procedure date.
+  Treat a document as H&P if its type or text clearly indicates a history and physical (e.g. "H&P", "History and Physical", "History & Physical").
 - Signed Surgical Consent must exist.
-If documentation is missing/outdated -> NEEDS_FOLLOW_UP.
+  Treat a document as consent if its type or text clearly indicates surgical consent.
+If documentation is missing or outside the window -> NEEDS_FOLLOW_UP with category REQUIRED_DOCUMENTATION.
 
 Rule 2: Required testing by procedure risk
-- LOW or MODERATE risk: CBC within 30 days of procedure date.
-- HIGH risk: CBC within 14 days and CMP within 14 days.
-Use only the most recent result for each required test.
-If a required test is missing or outside window -> NEEDS_FOLLOW_UP.
+- LOW or MODERATE risk: most recent CBC within 30 days of procedure date.
+- HIGH risk: most recent CBC within 14 days and most recent CMP within 14 days of procedure date.
+Treat lab codes containing "CBC" or "CMP" as those tests (case-insensitive).
+If a required test is missing or outside the window -> NEEDS_FOLLOW_UP with category REQUIRED_TESTING.
 
 Rule 3: Anticoagulation management
-If the patient is currently taking an anticoagulant, a perioperative anticoagulation plan must be documented and clear.
-If no clear plan is documented -> NEEDS_FOLLOW_UP.
+Common anticoagulants include apixaban, warfarin, rivaroxaban, dabigatran, edoxaban, and enoxaparin when used as anticoagulation.
+- If an anticoagulant medication has active=true, a clear perioperative anticoagulation plan must be documented.
+  A plan that only says to follow up, consult cardiology, or mentions anticoagulation without hold/resume timing is NOT clear.
+- If an anticoagulant medication has active=null, you cannot determine current use -> NEEDS_FOLLOW_UP with category MISSING_REQUIRED_DATA.
+If no clear perioperative plan is documented for a patient currently taking an anticoagulant -> NEEDS_FOLLOW_UP with category ANTICOAGULATION_MANAGEMENT.
 
 Rule 4: Acute safety exclusions
-If any of the following are present at review time -> NOT_CLEARED:
+Use the most recent blood_pressure and temperature vitals with valid dates.
+If any of the following are present -> NOT_CLEARED with category ACUTE_SAFETY_EXCLUSION:
 - Systolic BP >= 180 mmHg
 - Diastolic BP >= 110 mmHg
 - Temperature > 100.4 F
-Use the most recent relevant vital.
+If a required vital needed for this rule is missing or unusable -> NEEDS_FOLLOW_UP with category MISSING_REQUIRED_DATA.
 
 Final determination
+- NOT_CLEARED if any acute safety exclusion is present.
+- Otherwise NEEDS_FOLLOW_UP if any issue applies.
 - READY only if all required criteria are satisfied and no exclusions are present.
-- If a required field needed to evaluate a rule is missing/unknown -> NEEDS_FOLLOW_UP.
+
+Missing-data handling (critical)
+- If a required field needed to evaluate a rule is missing, null, or unknown, report category MISSING_REQUIRED_DATA for that specific gap.
+- Do NOT report REQUIRED_DOCUMENTATION or REQUIRED_TESTING merely because procedure_date is missing. In that case, report only MISSING_REQUIRED_DATA for procedure.procedure_date, then evaluate other rules that do not require procedure_date (such as anticoagulation).
+- Do NOT speculate or add "cannot confirm" issues for rules you could not evaluate because prerequisite data is missing.
+- Evaluate every rule you can with available data and report every definitively violated rule.
+
+Issue reporting
+- Include one issue per violated rule category. Use only these categories:
+  REQUIRED_DOCUMENTATION, REQUIRED_TESTING, ANTICOAGULATION_MANAGEMENT, ACUTE_SAFETY_EXCLUSION, MISSING_REQUIRED_DATA
+- Do not omit a violated rule. Do not add extra categories for uncertain or blocked evaluations.
+- If multiple distinct missing-data gaps exist, include separate MISSING_REQUIRED_DATA issues (for example, missing procedure date and missing blood pressure are separate issues).
+
+Evidence requirements (critical)
+- Every issue must include evidence.source and evidence.details.
+- evidence.source must be a structured path into the submission JSON, such as:
+  procedure.procedure_date, patient.mrn, vitals[1], documents[4], medications[1], labs
+- Do not use human-readable labels like "Submission JSON" or "Lab reports" as the source.
+- evidence.details must cite concrete values from the submission (dates, numbers, null fields, document text snippets, medication names).
 
 Output requirements
-- Return exactly one JSON object.
+- Return exactly one JSON object with decision, issues, and explanation.
+- explanation should briefly summarize the reported issue categories.
