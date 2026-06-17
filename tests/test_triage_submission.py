@@ -6,15 +6,16 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from pydantic import ValidationError
 
 from core import (
-    BASELINE_SYSTEM_PROMPT,
     PatientSubmission,
+    TriageIssue,
+    TriageIssueEvidence,
     TriageOutput,
-    triage_output_json_schema,
     triage_submission,
 )
+from triage_llm import EXTRACTION_SYSTEM_PROMPT, ClinicalExtraction
+from triage_rules import evaluate_triage
 
 
 @pytest.fixture
@@ -23,9 +24,10 @@ def openai_client(monkeypatch: pytest.MonkeyPatch) -> Mock:
     client.responses.create.return_value = SimpleNamespace(
         output_text=json.dumps(
             {
-                "decision": "READY",
-                "issues": [],
-                "explanation": "All required criteria are satisfied.",
+                "history_and_physical_documents": [],
+                "surgical_consent_documents": [],
+                "anticoagulation_plan_documents": [],
+                "medications": [],
             }
         ),
     )
@@ -49,7 +51,12 @@ def submission_payload() -> dict[str, object]:
                 "systolic": 120,
                 "diastolic": 80,
                 "date": "2026-01-25",
-            }
+            },
+            {
+                "type": "temperature",
+                "value_f": 98.6,
+                "date": "2026-01-25",
+            },
         ],
         "labs": [
             {
@@ -76,67 +83,162 @@ def submission_payload() -> dict[str, object]:
     }
 
 
-def test_triage_submission_returns_structured_output(
-    openai_client: Mock,
-    submission_payload: dict[str, object],
-) -> None:
-    output = triage_submission(submission_payload, model="test-model")
-
-    assert isinstance(output, TriageOutput)
-    assert output.decision == "READY"
-    assert output.issues == []
-    assert output.explanation == "All required criteria are satisfied."
-
-    assert openai_client.responses.create.call_count == 1
-    call = openai_client.responses.create.call_args.kwargs
-    assert call["model"] == "test-model"
-    assert call["instructions"] == BASELINE_SYSTEM_PROMPT
-
-    text_config = call["text"]
-    assert isinstance(text_config, dict)
-    response_format = text_config["format"]
-    assert isinstance(response_format, dict)
-    assert response_format["type"] == "json_schema"
-    assert response_format["name"] == "preop_triage_output"
-    assert response_format["schema"] == triage_output_json_schema()
-    assert response_format["strict"] is False
-
-
-def test_triage_submission_builds_prompt_from_validated_submission(
-    openai_client: Mock,
-    submission_payload: dict[str, object],
-) -> None:
-    submission = PatientSubmission.model_validate(submission_payload)
-
-    triage_submission(submission, model="test-model")
-
-    assert openai_client.responses.create.call_count == 1
-    call = openai_client.responses.create.call_args.kwargs
-    message = call["input"][0]
-    content = message["content"][0]
-    prompt = content["text"]
-
-    assert message["type"] == "message"
-    assert message["role"] == "user"
-    assert content["type"] == "input_text"
-    assert json.loads(prompt.split("Submission JSON:\n", 1)[1]) == submission.model_dump()
-
-
-def test_triage_submission_rejects_invalid_model_json(
+def test_triage_submission_calls_extraction_llm(
     openai_client: Mock,
     submission_payload: dict[str, object],
 ) -> None:
     openai_client.responses.create.return_value = SimpleNamespace(
         output_text=json.dumps(
             {
-                "decision": "MAYBE",
-                "issues": [],
-                "explanation": "Not a valid triage decision.",
+                "history_and_physical_documents": [
+                    {"document_index": 0, "date": "2026-01-20"}
+                ],
+                "surgical_consent_documents": [
+                    {"document_index": 1, "date": "2026-01-22", "is_signed": True}
+                ],
+                "anticoagulation_plan_documents": [],
+                "medications": [],
             }
         )
     )
 
-    with pytest.raises(ValidationError):
-        triage_submission(submission_payload, model="test-model")
+    output = triage_submission(submission_payload, model="test-model")
 
+    assert isinstance(output, TriageOutput)
+    assert output.decision == "READY"
     assert openai_client.responses.create.call_count == 1
+    call = openai_client.responses.create.call_args.kwargs
+    assert call["model"] == "test-model"
+    assert call["instructions"] == EXTRACTION_SYSTEM_PROMPT
+
+
+def test_evaluate_triage_flags_missing_procedure_date_and_anticoag() -> None:
+    submission = PatientSubmission.model_validate(
+        {
+            "procedure": {
+                "procedure_risk": "LOW",
+                "procedure_date": None,
+            },
+            "medications": [{"name": "apixaban", "active": True}],
+            "documents": [
+                {
+                    "type": "Perioperative Medication Plan",
+                    "text": "Follow up with cardiology for peri-op recommendations.",
+                }
+            ],
+        }
+    )
+    extraction = ClinicalExtraction(
+        medications=[{"medication_index": 0, "is_anticoagulant": True}],
+        anticoagulation_plan_documents=[{"document_index": 0, "is_clear": False}],
+    )
+
+    output = evaluate_triage(submission, extraction)
+
+    categories = {issue.category for issue in output.issues}
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    assert categories == {"MISSING_REQUIRED_DATA", "ANTICOAGULATION_MANAGEMENT"}
+
+
+def test_evaluate_triage_not_cleared_for_fever() -> None:
+    submission = PatientSubmission.model_validate(
+        {
+            "procedure": {
+                "procedure_risk": "LOW",
+                "procedure_date": "2026-03-03",
+            },
+            "vitals": [
+                {
+                    "type": "temperature",
+                    "value_f": 101.0,
+                    "date": "2026-02-26",
+                },
+                {
+                    "type": "blood_pressure",
+                    "systolic": 120,
+                    "diastolic": 80,
+                    "date": "2026-02-26",
+                },
+            ],
+            "labs": [{"code": "CBC", "effective_at": "2026-02-23"}],
+            "documents": [],
+        }
+    )
+    extraction = ClinicalExtraction(
+        history_and_physical_documents=[{"document_index": 0, "date": "2026-02-21"}],
+        surgical_consent_documents=[{"document_index": 1, "date": "2026-02-25", "is_signed": True}],
+    )
+
+    output = evaluate_triage(submission, extraction)
+
+    assert output.decision == "NOT_CLEARED"
+    assert any(issue.category == "ACUTE_SAFETY_EXCLUSION" for issue in output.issues)
+
+
+def test_evaluate_triage_stale_hp_when_no_valid_hp_in_extraction() -> None:
+    submission = PatientSubmission.model_validate(
+        {
+            "procedure": {
+                "procedure_risk": "LOW",
+                "procedure_date": "2026-03-08",
+            },
+            "vitals": [
+                {"type": "blood_pressure", "systolic": 120, "diastolic": 80, "date": "2026-03-01"},
+                {"type": "temperature", "value_f": 98.6, "date": "2026-03-01"},
+            ],
+            "labs": [{"code": "CBC", "effective_at": "2026-03-01T09:10:00Z"}],
+            "documents": [
+                {"type": "History/Physical (H&P)", "date": "2026-01-22", "text": "H&P completed."},
+                {"type": "Consent - Elective Procedure", "date": "2026-03-02", "text": "Signed consent."},
+            ],
+        }
+    )
+    extraction = ClinicalExtraction(
+        history_and_physical_documents=[{"document_index": 0, "date": "2026-01-22"}],
+        surgical_consent_documents=[{"document_index": 1, "date": "2026-03-02", "is_signed": True}],
+        medications=[],
+    )
+
+    output = evaluate_triage(submission, extraction)
+
+    assert any(
+        issue.category == "REQUIRED_DOCUMENTATION" and issue.evidence.source == "documents[0]"
+        for issue in output.issues
+    )
+
+
+def test_evaluate_triage_unknown_anticoag_active_status_only() -> None:
+    submission = PatientSubmission.model_validate(
+        {
+            "procedure": {
+                "procedure_risk": "LOW",
+                "procedure_date": "2026-03-02",
+            },
+            "vitals": [
+                {"type": "blood_pressure", "systolic": 120, "diastolic": 80, "date": "2026-02-25"},
+                {"type": "temperature", "value_f": 99.0, "date": "2026-02-25"},
+            ],
+            "labs": [{"code": "CBC", "effective_at": "2026-02-22T09:10:00Z"}],
+            "medications": [
+                {"name": "lisinopril", "active": True},
+                {"name": "warfarin", "active": None},
+            ],
+            "documents": [
+                {"type": "H&P Note", "date": "2026-02-20", "text": "H&P completed."},
+                {"type": "Procedure Consent Form", "date": "2026-02-24", "text": "Signed consent."},
+            ],
+        }
+    )
+    extraction = ClinicalExtraction(
+        history_and_physical_documents=[{"document_index": 0, "date": "2026-02-20"}],
+        surgical_consent_documents=[{"document_index": 1, "date": "2026-02-24", "is_signed": True}],
+        medications=[
+            {"medication_index": 0, "is_anticoagulant": False},
+            {"medication_index": 1, "is_anticoagulant": True},
+        ],
+    )
+
+    output = evaluate_triage(submission, extraction)
+
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    assert [issue.category for issue in output.issues] == ["MISSING_REQUIRED_DATA"]
